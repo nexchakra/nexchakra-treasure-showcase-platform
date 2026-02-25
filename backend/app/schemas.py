@@ -1,20 +1,20 @@
-from pydantic import BaseModel, EmailStr
-from typing import Optional
+from pydantic import BaseModel, EmailStr, Field
+from typing import Optional, List
+from datetime import datetime
 from .models import UserRole
 
-# Data required for Registration
+# --- AUTH SCHEMAS ---
+
 class UserCreate(BaseModel):
     name: str
     email: EmailStr
     password: str
     phone: Optional[str] = None
 
-# Data required for Login
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
-# Data returned to Frontend (hiding the password)
 class UserOut(BaseModel):
     id: int
     name: str
@@ -28,3 +28,46 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     user: UserOut
+
+# --- CATEGORY SCHEMAS ---
+
+class CategoryBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    slug: Optional[str] = None
+    image: Optional[str] = None
+
+class CategoryCreate(CategoryBase):
+    pass
+
+class CategoryOut(CategoryBase):
+    id: int
+    
+    class Config:
+        from_attributes = True
+
+# --- PRODUCT SCHEMAS ---
+
+class ProductBase(BaseModel):
+    title: str
+    description: Optional[str] = None
+    price: float
+    discount_price: Optional[float] = None
+    category_id: int
+    stock: int = 0
+    material: Optional[str] = None
+    weight: Optional[float] = None
+    image_url: Optional[str] = None
+    sku: Optional[str] = None
+    is_limited: bool = False
+    is_active: bool = True
+
+class ProductCreate(ProductBase):
+    slug: Optional[str] = None
+
+class ProductOut(ProductBase):
+    id: int
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
