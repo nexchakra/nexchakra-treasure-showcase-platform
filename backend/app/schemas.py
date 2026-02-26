@@ -71,3 +71,73 @@ class ProductOut(ProductBase):
     
     class Config:
         from_attributes = True
+        
+# --- CART SCHEMAS ---
+
+class CartItemCreate(BaseModel):
+    product_id: int
+    quantity: int = Field(default=1, gt=0) # Must be at least 1
+    variant_id: Optional[int] = None # Optional for rings/sizes
+
+class CartItemUpdate(BaseModel):
+    quantity: int = Field(..., gt=0)
+
+class CartItemOut(BaseModel):
+    id: int
+    product_id: int
+    product: ProductOut # This nesting allows the frontend to see title/price/image
+    quantity: int
+    variant_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+class CartOut(BaseModel):
+    id: int
+    user_id: int
+    items: List[CartItemOut] = []
+    total_price: float = 0.0 # We will calculate this in the logic
+
+    class Config:
+        from_attributes = True
+        
+# --- ORDER SCHEMAS ---
+
+class OrderItemOut(BaseModel):
+    product_id: int
+    quantity: int
+    price: float
+    
+    class Config:
+        from_attributes = True
+
+class OrderOut(BaseModel):
+    id: int
+    total_amount: float
+    status: str
+    payment_status: str
+    created_at: datetime
+    items: List[OrderItemOut] = []
+
+    class Config:
+        from_attributes = True
+        
+# --- ADDRESS SCHEMAS ---
+
+class AddressBase(BaseModel):
+    full_address: str
+    city: str
+    state: str
+    pincode: str
+    country: str = "India"
+    is_default: bool = False
+
+class AddressCreate(AddressBase):
+    pass
+
+class AddressOut(AddressBase):
+    id: int
+    user_id: int
+
+    class Config:
+        from_attributes = True
