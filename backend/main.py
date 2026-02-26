@@ -6,6 +6,24 @@ from sqlalchemy import desc,func
 from app import models, schemas, auth
 from app.database import engine, get_db
 from app.auth import get_current_user
+from fastapi import WebSocket, WebSocketDisconnect
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            await connection.send_json(message)
+
+manager = ConnectionManager()
 
 # Initialize FastAPI
 app = FastAPI(title="NexChakra Jewelry API")
@@ -108,7 +126,7 @@ def update_category(
 def list_products(
     category_id: Optional[int] = None, 
     search: Optional[str] = None,
-    sort_by: Optional[str] = None, # e.g., "price_asc", "price_desc", "newest"
+    sort_by: Optional[str] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
     material: Optional[str] = None,
@@ -116,36 +134,24 @@ def list_products(
 ):
     query = db.query(models.Product)
 
-    # 1. Filter by Category
     if category_id:
         query = query.filter(models.Product.category_id == category_id)
-
-    # 2. Search by Title or Description (Case-insensitive)
     if search:
-        query = query.filter(
-            (models.Product.title.ilike(f"%{search}%")) | 
-            (models.Product.description.ilike(f"%{search}%"))
-        )
-
-    # 3. Filter by Material
+        query = query.filter((models.Product.title.ilike(f"%{search}%")) | (models.Product.description.ilike(f"%{search}%")))
     if material:
         query = query.filter(models.Product.material.ilike(f"%{material}%"))
-
-    # 4. Filter by Price Range
     if min_price is not None:
         query = query.filter(models.Product.price >= min_price)
     if max_price is not None:
         query = query.filter(models.Product.price <= max_price)
 
-    return query.all()
-
-# 5. Sorting Logic
+    # Sorting Logic 
     if sort_by == "price_asc":
         query = query.order_by(models.Product.price.asc())
     elif sort_by == "price_desc":
         query = query.order_by(models.Product.price.desc())
     elif sort_by == "newest":
-        query = query.order_by(desc(models.Product.id)) # Assuming higher ID = newer
+        query = query.order_by(desc(models.Product.id))
     
     return query.all()
 
@@ -286,74 +292,52 @@ def remove_from_cart(
     return None
 
 # --- ORDER ROUTES ---
-
 @app.post("/orders", response_model=schemas.OrderOut)
-def create_order(
+async def create_order(
     address_id: int, 
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    # 1. Get the user's cart
     cart = db.query(models.Cart).filter(models.Cart.user_id == current_user.id).first()
     if not cart or not cart.items:
         raise HTTPException(status_code=400, detail="Cart is empty")
 
-    # 2. Calculate total and verify stock for all items
     total_amount = 0
     order_items_to_create = []
     
     for cart_item in cart.items:
         product = cart_item.product
-        
-        # Check stock again at the moment of checkout
         if product.stock < cart_item.quantity:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Not enough stock for {product.title}. Only {product.stock} left."
-            )
+            raise HTTPException(status_code=400, detail=f"Not enough stock for {product.title}")
         
-        # Use discount price if available, otherwise regular price
         item_price = product.discount_price if product.discount_price else product.price
         total_amount += float(item_price) * cart_item.quantity
-        
-        # Prepare the OrderItem data
-        order_items_to_create.append({
-            "product_id": product.id,
-            "quantity": cart_item.quantity,
-            "price": item_price,
-            "variant_id": cart_item.variant_id
-        })
+        order_items_to_create.append({"product_id": product.id, "quantity": cart_item.quantity, "price": item_price, "variant_id": cart_item.variant_id})
 
-    # 3. Create the Order record
-    new_order = models.Order(
-        user_id=current_user.id,
-        address_id=address_id,
-        total_amount=total_amount,
-        status="pending",
-        payment_status="pending"
-    )
+    new_order = models.Order(user_id=current_user.id, address_id=address_id, total_amount=total_amount, status="pending", payment_status="pending")
     db.add(new_order)
-    db.flush() # Gets the new_order.id without committing yet
+    db.flush() 
 
-    # 4. Create OrderItems and Update Product Stock
     for item_data in order_items_to_create:
-        # Create OrderItem
-        order_item = models.OrderItem(
-            order_id=new_order.id,
-            **item_data
-        )
+        order_item = models.OrderItem(order_id=new_order.id, **item_data)
         db.add(order_item)
-        
-        # REDUCE STOCK: This is the most important business rule
         product = db.query(models.Product).filter(models.Product.id == item_data["product_id"]).first()
         product.stock -= item_data["quantity"]
 
-    # 5. Clear the User's Cart
     db.query(models.CartItem).filter(models.CartItem.cart_id == cart.id).delete()
-    
     db.commit()
     db.refresh(new_order)
+
+    # BROADCAST ALERT (Must happen before return!)
+    await manager.broadcast({
+        "event": "NEW_ORDER",
+        "order_id": new_order.id,
+        "customer": current_user.name,
+        "amount": total_amount
+    })
+
     return new_order
+    
 
 @app.get("/orders", response_model=List[schemas.OrderOut])
 def get_my_orders(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -436,3 +420,88 @@ def get_admin_dashboard_stats(
         "total_orders": total_orders,
         "top_selling_products": top_products_list
     }
+    
+# --- ADMIN ORDER MANAGEMENT ---
+
+@app.get("/admin/orders", response_model=List[schemas.OrderOut])
+def get_all_orders(
+    status: Optional[str] = None, 
+    db: Session = Depends(get_db), 
+    admin: models.User = Depends(get_current_admin)
+):
+    """Allows Admin to see every order in the system, optionally filtered by status."""
+    query = db.query(models.Order)
+    if status:
+        query = query.filter(models.Order.status == status)
+    return query.all()
+
+@app.patch("/admin/orders/{order_id}/status", response_model=schemas.OrderOut)
+def update_order_status(
+    order_id: int, 
+    new_status: str, # e.g., "shipped", "delivered", "cancelled"
+    db: Session = Depends(get_db), 
+    admin: models.User = Depends(get_current_admin)
+):
+    """Updates the status of a specific order."""
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    order.status = new_status
+    db.commit()
+    db.refresh(order)
+    return order
+
+# --- WISHLIST ROUTES ---
+
+@app.post("/wishlist/{product_id}", status_code=status.HTTP_200_OK)
+def toggle_wishlist(
+    product_id: int, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    """Adds or removes a product from the user's wishlist."""
+    # Check if product exists
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # Check if it's already in the wishlist
+    wishlist_item = db.query(models.Wishlist).filter(
+        models.Wishlist.user_id == current_user.id,
+        models.Wishlist.product_id == product_id
+    ).first()
+
+    if wishlist_item:
+        db.delete(wishlist_item)
+        db.commit()
+        return {"message": "Removed from wishlist"}
+    
+    new_item = models.Wishlist(user_id=current_user.id, product_id=product_id)
+    db.add(new_item)
+    db.commit()
+    return {"message": "Added to wishlist"}
+
+@app.get("/wishlist", response_model=List[schemas.ProductOut])
+def get_my_wishlist(
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    """Returns all products in the user's wishlist."""
+    # We join with Product to return the actual product details
+    items = db.query(models.Product)\
+        .join(models.Wishlist)\
+        .filter(models.Wishlist.user_id == current_user.id)\
+        .all()
+    return items
+
+
+@app.websocket("/ws/admin/notifications")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text() # Keep the connection alive
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
