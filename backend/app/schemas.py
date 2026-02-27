@@ -104,23 +104,29 @@ class CartOut(BaseModel):
 # --- ORDER SCHEMAS ---
 
 class OrderItemOut(BaseModel):
+    id: int
     product_id: int
+    product: ProductOut  # 🔥 Relationship: Returns full product info (title, image_url, etc.)
     quantity: int
-    price: float
+    price: float         # This is the price at the time of purchase
+    variant_id: Optional[int] = None
     
     class Config:
         from_attributes = True
 
 class OrderOut(BaseModel):
     id: int
+    user_id: int
+    address_id: int
     total_amount: float
     status: str
     payment_status: str
     created_at: datetime
-    items: List[OrderItemOut] = []
+    items: List[OrderItemOut] = [] # 🔥 Returns all specific items bought in this order
 
     class Config:
         from_attributes = True
+
         
 # --- ADDRESS SCHEMAS ---
 
