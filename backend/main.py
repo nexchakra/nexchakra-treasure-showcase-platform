@@ -230,6 +230,59 @@ async def create_order(address_id: int, db: Session = Depends(get_db), current_u
     await manager.broadcast({"event": "NEW_ORDER", "order_id": new_order.id, "customer": current_user.name, "amount": total_amount})
     return new_order
 
+@app.patch("/orders/{order_id}/cancel", response_model=schemas.OrderOut)
+async def cancel_order(
+    order_id: int, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    # 1. Fetch order with items
+    order = db.query(models.Order).options(joinedload(models.Order.items)).filter(
+        models.Order.id == order_id
+    ).first()
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # 2. Security: Only the owner or an admin can cancel
+    if order.user_id != current_user.id and current_user.role != models.UserRole.admin:
+        raise HTTPException(status_code=403, detail="Not authorized to cancel this order")
+
+    # 3. Logic: Only allow cancellation of 'pending' orders
+    if order.status.lower() != "pending":
+        raise HTTPException(status_code=400, detail=f"Cannot cancel order with status: {order.status}")
+
+    try:
+        # 4. RESTOCK: Return items to inventory
+        for item in order.items:
+            product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
+            if product:
+                product.stock += item.quantity
+                # Notify everyone that stock increased
+                await manager.broadcast({
+                    "event": "STOCK_UPDATE", 
+                    "product_id": product.id, 
+                    "new_stock": product.stock
+                })
+
+        # 5. Update Status
+        order.status = "cancelled"
+        db.commit()
+        db.refresh(order)
+
+        # 6. Notify Admin of Cancellation
+        await manager.broadcast({
+            "event": "ORDER_CANCELLED", 
+            "order_id": order.id, 
+            "customer": current_user.name
+        })
+
+        return order
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Cancellation failed: {str(e)}")
+    
 # --- ADMIN ENDPOINTS ---
 @app.get("/admin/analytics/dashboard")
 def get_dashboard_stats(db: Session = Depends(get_db), admin: models.User = Depends(get_current_admin)):
@@ -286,3 +339,4 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/")
 def root():
     return {"status": "online", "message": "NexChakra Jewelry API Active"}
+
