@@ -3,19 +3,24 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
 from dotenv import load_dotenv
+from sqlalchemy.pool import NullPool
 
 load_dotenv()
 
-# We use "NullPool" for serverless DBs like Neon to handle connections efficiently
-from sqlalchemy.pool import NullPool
-
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
 
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, poolclass=NullPool
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# --- THE FIX STARTS HERE ---
+# SQLAlchemy requires 'postgresql://', but Neon/Render often provide 'postgres://'
+if SQLALCHEMY_DATABASE_URL and SQLALCHEMY_DATABASE_URL.startswith("postgres://"):
+    SQLALCHEMY_DATABASE_URL = SQLALCHEMY_DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# --- THE FIX ENDS HERE ---
 
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, 
+    poolclass=NullPool
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Dependency to get DB session in routes
