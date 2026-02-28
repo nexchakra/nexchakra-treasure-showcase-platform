@@ -1,27 +1,17 @@
-# Web Server & Framework
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 gunicorn==23.0.0
 websockets==12.0
-
-# Database & Migrations
 SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
 alembic==1.14.0
-
-# Security & Auth
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.22
 email-validator==2.2.0
-
-
-# Validation & Environment
 pydantic==2.9.2
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
-
-# Utilities
 typing_extensions==4.12.2
 annotated-types==0.7.0
 anyio==4.12.1
