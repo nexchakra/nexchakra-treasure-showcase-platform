@@ -131,13 +131,93 @@ def list_products(
     
     return query.all()
 
+@app.put("/products/{product_id}", response_model=schemas.ProductOut)
+async def update_product(
+    product_id: int,
+    product: schemas.ProductCreate,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(get_current_admin)
+):
+    db_product = db.query(models.Product).filter(
+        models.Product.id == product_id
+    ).first()
+
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    db_product.title = product.title
+    db_product.description = product.description
+    db_product.price = product.price
+    db_product.stock = product.stock
+    db_product.category_id = product.category_id
+    db_product.material = product.material
+    db_product.image_url = product.image_url
+
+    db.commit()
+    db.refresh(db_product)
+
+    # 🔔 realtime update notification
+    await manager.broadcast_all({
+        "type": "PRODUCT_UPDATED",
+        "title": db_product.title,
+        "message": f"{db_product.title} details updated",
+        "price": float(db_product.price),
+        "product_id": db_product.id
+    })
+
+    return db_product
+
+@app.delete("/products/{product_id}")
+async def delete_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(get_current_admin)
+):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+
+    if not product:
+        raise HTTPException(404, "Product not found")
+
+    # SOFT DELETE
+    product.is_active = False
+    db.commit()
+
+    await manager.broadcast_all({
+        "type":"PRODUCT_UPDATE",
+        "action":"deleted",
+        "title":product.title,
+        "product_id":product_id
+    })
 @app.post("/products", response_model=schemas.ProductOut)
-def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db), admin: models.User = Depends(get_current_admin)):
-    data = product.model_dump()
-    if not data.get("slug"): data["slug"] = data["title"].lower().replace(" ", "-")
-    if not data.get("sku"): data["sku"] = generate_sku()
-    new_product = models.Product(**data)
-    db.add(new_product); db.commit(); db.refresh(new_product)
+async def create_product(
+    product: schemas.ProductCreate,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(get_current_admin)
+):
+    new_product = models.Product(
+        title=product.title,
+        description=product.description,
+        price=product.price,
+        stock=product.stock,
+        category_id=product.category_id,
+        material=product.material,
+        image_url=product.image_url,
+        sku=generate_sku()
+    )
+
+    db.add(new_product)
+    db.commit()
+    db.refresh(new_product)
+
+    # 🔔 notify everyone (customers + admins)
+    await manager.broadcast_all({
+        "type": "PRODUCT_CREATED",
+        "title": new_product.title,
+        "message": f"{new_product.title} is now available",
+        "price": float(new_product.price),
+        "product_id": new_product.id
+    })
+
     return new_product
 
 # --- CART ROUTES ---
@@ -154,22 +234,33 @@ def get_user_cart(db: Session = Depends(get_db), current_user: models.User = Dep
 @app.post("/cart/items", response_model=schemas.CartItemOut)
 def add_to_cart(item_data: schemas.CartItemCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     cart = get_or_create_cart(db, current_user.id)
-    product = db.query(models.Product).filter(models.Product.id == item_data.product_id).first()
-    
-    if not product or product.stock < item_data.quantity:
-        raise HTTPException(status_code=400, detail="Stock low or product unavailable")
 
-    existing = db.query(models.CartItem).filter(models.CartItem.cart_id == cart.id, models.CartItem.product_id == item_data.product_id).first()
+    product = db.query(models.Product).filter(models.Product.id == item_data.product_id).first()
+    if not product:
+        raise HTTPException(404, "Product not found")
+
+    existing = db.query(models.CartItem).filter(
+        models.CartItem.cart_id == cart.id,
+        models.CartItem.product_id == item_data.product_id
+    ).first()
+
+    new_qty = item_data.quantity + (existing.quantity if existing else 0)
+
+    if new_qty > product.stock:
+        raise HTTPException(status_code=400, detail=f"Only {product.stock} available")
+
     if existing:
-        existing.quantity += item_data.quantity
+        existing.quantity = new_qty
     else:
         db.add(models.CartItem(cart_id=cart.id, **item_data.model_dump()))
-    
+
     db.commit()
-    # Reload with joined product info for frontend display
+
     return db.query(models.CartItem).options(joinedload(models.CartItem.product)).filter(
-        models.CartItem.cart_id == cart.id, models.CartItem.product_id == item_data.product_id
+        models.CartItem.cart_id == cart.id,
+        models.CartItem.product_id == item_data.product_id
     ).first()
+
 
 @app.patch("/cart/items/{item_id}", response_model=schemas.CartItemOut)
 def update_cart_quantity(item_id: int, quantity: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -284,31 +375,131 @@ async def cancel_order(
         raise HTTPException(status_code=500, detail=f"Cancellation failed: {str(e)}")
     
 # --- ADMIN ENDPOINTS ---
+@app.get("/admin/analytics/sales")
+def sales_chart(db: Session = Depends(get_db), admin: models.User = Depends(get_current_admin)):
+
+    data = db.query(
+        func.date(models.Order.created_at),
+        func.sum(models.Order.total_amount)
+    ).group_by(func.date(models.Order.created_at)).all()
+
+    return [{"date": str(d[0]), "revenue": float(d[1])} for d in data]
+
 @app.get("/admin/analytics/dashboard")
 def get_dashboard_stats(db: Session = Depends(get_db), admin: models.User = Depends(get_current_admin)):
-    rev = db.query(func.sum(models.Order.total_amount)).filter(models.Order.status != "cancelled").scalar() or 0
-    tops = db.query(models.Product.title, func.sum(models.OrderItem.quantity).label("sold")).join(models.OrderItem).group_by(models.Product.id).order_by(desc("sold")).limit(5).all()
-    
+
+    # TOTAL REVENUE (all non-cancelled orders)
+    revenue = db.query(func.sum(models.Order.total_amount))\
+        .filter(models.Order.status != "cancelled")\
+        .scalar() or 0
+
+    # TOTAL ORDERS
+    total_orders = db.query(models.Order).count()
+
+    # TOP PRODUCTS
+    tops = db.query(
+        models.Product.title,
+        func.sum(models.OrderItem.quantity).label("sold")
+    ).join(models.OrderItem)\
+     .group_by(models.Product.id)\
+     .order_by(desc("sold"))\
+     .limit(5).all()
+
     return {
-        "total_revenue": rev,
-        "total_orders": db.query(models.Order).count(),
+        "total_revenue": float(revenue),
+        "total_orders": total_orders,
         "top_selling_products": [{"name": p[0], "sold": p[1]} for p in tops]
     }
-
-@app.get("/admin/users", response_model=List[schemas.UserOut])
-def get_all_customers(db: Session = Depends(get_db), admin: models.User = Depends(get_current_admin)):
-    """Deduplicated user route: Returns all registered customers sorted by newest."""
-    return db.query(models.User).filter(models.User.role == models.UserRole.customer).order_by(models.User.id.desc()).all()
 
 @app.get("/admin/carts")
 def get_all_active_carts(db: Session = Depends(get_db), admin: models.User = Depends(get_current_admin)):
     """Returns every active user cart with detailed product nesting."""
     return db.query(models.Cart).options(joinedload(models.Cart.user), joinedload(models.Cart.items).joinedload(models.CartItem.product)).all()
 
+@app.get("/orders", response_model=List[schemas.OrderOut])
+def get_my_orders(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    orders = db.query(models.Order)\
+        .options(
+            joinedload(models.Order.items).joinedload(models.OrderItem.product)
+        )\
+        .filter(models.Order.user_id == current_user.id)\
+        .order_by(models.Order.id.desc())\
+        .all()
+
+    return orders
+
 @app.get("/admin/orders")
 def get_all_orders(db: Session = Depends(get_db), admin: models.User = Depends(get_current_admin)):
     """Returns all orders globally for admin tracking."""
     return db.query(models.Order).options(joinedload(models.Order.user), joinedload(models.Order.items).joinedload(models.OrderItem.product)).order_by(models.Order.id.desc()).all()
+
+@app.patch("/admin/orders/{order_id}/status")
+async def update_order_status(
+    order_id: int,
+    status: str,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(get_current_admin)
+):
+
+    order = db.query(models.Order).filter(models.Order.id==order_id).first()
+    if not order:
+        raise HTTPException(404,"Order not found")
+
+    order.status = status
+
+    # COD payment success after delivery
+    if status == "delivered":
+        order.payment_status = "success"
+
+    if status == "cancelled":
+        order.payment_status = "failed"
+
+    db.commit()
+
+    # 🔔 SEND LIVE NOTIFICATION TO CUSTOMER
+    await manager.send_to_user(order.user_id, {
+    "type": "ORDER_STATUS",
+    "order_id": order.id,
+    "status": order.status,
+    "payment_status": order.payment_status
+})
+
+    return {"message":"Order updated"}
+
+# --- ADMIN USERS LIST ---
+@app.get("/admin/users", response_model=List[schemas.UserOut])
+def get_all_users(
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(get_current_admin)
+):
+    return db.query(models.User).order_by(models.User.created_at.desc()).all()
+
+@app.post("/orders/{order_id}/return")
+def return_order(
+    order_id:int,
+    db:Session=Depends(get_db),
+    current_user:models.User=Depends(get_current_user)
+):
+    order=db.query(models.Order).filter(
+        models.Order.id==order_id,
+        models.Order.user_id==current_user.id
+    ).first()
+
+    if not order:
+        raise HTTPException(404,"Order not found")
+
+    if order.status!="delivered":
+        raise HTTPException(400,"Return allowed only after delivery")
+
+    order.status="refunded"
+    order.payment_status="refunded"
+
+    db.commit()
+
+    return {"message":"Return successful"}
 
 # --- WISHLIST & ADDRESSES ---
 @app.post("/wishlist/{product_id}")
@@ -324,6 +515,62 @@ def toggle_wishlist(product_id: int, db: Session = Depends(get_db), current_user
 @app.get("/addresses", response_model=List[schemas.AddressOut])
 def get_my_addresses(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return db.query(models.Address).filter(models.Address.user_id == current_user.id).all()
+
+@app.post("/addresses", response_model=schemas.AddressOut)
+def create_address(
+    address: schemas.AddressCreate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    new_address =models.Address(
+        user_id=current_user.id,
+        full_address=address.full_address,
+        city=address.city,
+        state=address.state,
+        pincode=address.pincode,
+        country=address.country,
+        is_default=address.is_default
+    )
+
+    db.add(new_address)
+    db.commit()
+    db.refresh(new_address)
+
+    return new_address
+# --- PROFILE ---
+@app.get("/me", response_model=schemas.UserOut)
+def get_profile(current_user: models.User = Depends(get_current_user)):
+    return current_user
+
+
+@app.put("/me", response_model=schemas.UserOut)
+def update_profile(
+    data: schemas.UpdateProfile,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    current_user.name = data.name
+    current_user.phone = data.phone
+
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+@app.put("/me/password")
+def change_password(
+    data: schemas.ChangePassword,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    if not auth.verify_password(data.old_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Old password incorrect")
+
+    current_user.password_hash = auth.hash_password(data.new_password)
+    db.commit()
+
+    return {"message": "Password updated successfully"}   
+ 
 
 # --- WEBSOCKET ENDPOINT ---
 @app.websocket("/ws/notifications")

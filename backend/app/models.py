@@ -1,3 +1,4 @@
+import enum
 from sqlalchemy import (
     Column, Integer, BigInteger, String, Boolean,
     DateTime, ForeignKey, Numeric, Text, Enum
@@ -5,7 +6,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
-import enum
+created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 
 # ================= ENUMS =================
 
@@ -16,7 +18,6 @@ class UserRole(str, enum.Enum):
 class UserStatus(str, enum.Enum):
     active = "active"
     blocked = "blocked"
-
 
 # ================= USERS =================
 
@@ -35,6 +36,7 @@ class User(Base):
     cart = relationship("Cart", back_populates="user", uselist=False)
     addresses = relationship("Address", back_populates="user")
     orders = relationship("Order", back_populates="user")
+    wishlist = relationship("Wishlist", back_populates="user")
 
 
 # ================= ADDRESS =================
@@ -96,7 +98,7 @@ class Product(Base):
     variants = relationship("ProductVariant", back_populates="product")
 
 
-# ================= PRODUCT IMAGES =================
+# ================= PRODUCT EXTRAS =================
 
 class ProductImage(Base):
     __tablename__ = "product_images"
@@ -109,8 +111,6 @@ class ProductImage(Base):
     product = relationship("Product", back_populates="images")
 
 
-# ================= PRODUCT VARIANTS =================
-
 class ProductVariant(Base):
     __tablename__ = "product_variants"
 
@@ -122,6 +122,19 @@ class ProductVariant(Base):
     stock = Column(Integer)
 
     product = relationship("Product", back_populates="variants")
+
+
+# ================= WISHLIST (NEW) =================
+
+class Wishlist(Base):
+    __tablename__ = "wishlist"
+
+    id = Column(BigInteger, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"))
+    product_id = Column(BigInteger, ForeignKey("products.id"))
+
+    user = relationship("User", back_populates="wishlist")
+    product = relationship("Product")
 
 
 # ================= CART =================
@@ -159,15 +172,26 @@ class Order(Base):
     user_id = Column(BigInteger, ForeignKey("users.id"))
     address_id = Column(BigInteger, ForeignKey("addresses.id"))
     total_amount = Column(Numeric(10, 2))
-    status = Column(Enum('pending', 'paid', 'shipped', 'delivered', 'cancelled', name='order_status'), default='pending')
-    payment_status = Column(Enum('pending', 'success', 'failed', name='payment_status'), default='pending')
+
+    # ✅ CLEAN ORDER STATUS (NO PAID)
+    status = Column(
+        Enum('pending', 'shipped', 'delivered', 'cancelled', name='order_status'),
+        default='pending',
+        nullable=False
+    )
+
+    # ✅ PAYMENT STATUS
+    payment_status = Column(
+        Enum('pending', 'success', 'failed', name='payment_status'),
+        default='pending',
+        nullable=False
+    )
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="orders")
     items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
-
-# ================= ORDER ITEMS (CRITICAL FIX) =================
 
 class OrderItem(Base):
     __tablename__ = "order_items"
@@ -182,3 +206,5 @@ class OrderItem(Base):
 
     order = relationship("Order", back_populates="items")
     product = relationship("Product")
+
+is_active = Column(Boolean, default=True)

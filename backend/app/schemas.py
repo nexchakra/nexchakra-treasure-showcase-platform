@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional, List
 from datetime import datetime
 from .models import UserRole
@@ -9,7 +9,9 @@ class UserCreate(BaseModel):
     name: str
     email: EmailStr
     password: str
-    phone: Optional[str] = None
+    phone: str
+    role: Optional[UserRole] = UserRole.customer
+    admin_secret: Optional[str] = None # For creating admin accounts
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -19,8 +21,11 @@ class UserOut(BaseModel):
     id: int
     name: str
     email: str
-    role: UserRole
-    
+    phone: Optional[str] = None
+    role: str
+    status: str
+    created_at: Optional[datetime] = None
+
     class Config:
         from_attributes = True
 
@@ -28,6 +33,20 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     user: UserOut
+    
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: UserOut
+
+
+class UpdateProfile(BaseModel):
+    name: str
+    phone: str
+
+class ChangePassword(BaseModel):
+    old_password: str
+    new_password: str
 
 # --- CATEGORY SCHEMAS ---
 
@@ -71,13 +90,25 @@ class ProductOut(ProductBase):
     
     class Config:
         from_attributes = True
-        
+
+# --- WISHLIST SCHEMAS ---
+
+class WishlistToggle(BaseModel):
+    product_id: int
+
+class WishlistOut(BaseModel):
+    id: int
+    product: ProductOut
+
+    class Config:
+        from_attributes = True
+
 # --- CART SCHEMAS ---
 
 class CartItemCreate(BaseModel):
     product_id: int
-    quantity: int = Field(default=1, gt=0) # Must be at least 1
-    variant_id: Optional[int] = None # Optional for rings/sizes
+    quantity: int = Field(default=1, gt=0)
+    variant_id: Optional[int] = None
 
 class CartItemUpdate(BaseModel):
     quantity: int = Field(..., gt=0)
@@ -85,7 +116,7 @@ class CartItemUpdate(BaseModel):
 class CartItemOut(BaseModel):
     id: int
     product_id: int
-    product: ProductOut # This nesting allows the frontend to see title/price/image
+    product: ProductOut 
     quantity: int
     variant_id: Optional[int] = None
 
@@ -96,19 +127,28 @@ class CartOut(BaseModel):
     id: int
     user_id: int
     items: List[CartItemOut] = []
-    total_price: float = 0.0 # We will calculate this in the logic
+    total_price: float = 0.0
 
     class Config:
         from_attributes = True
-        
+
 # --- ORDER SCHEMAS ---
+
+class OrderItemCreate(BaseModel):
+    product_id: int
+    quantity: int
+
+class OrderCreate(BaseModel):
+    address_id: int
+    # items can be empty if the logic pulls from the Cart automatically
+    items: Optional[List[OrderItemCreate]] = None 
 
 class OrderItemOut(BaseModel):
     id: int
     product_id: int
-    product: ProductOut  # 🔥 Relationship: Returns full product info (title, image_url, etc.)
+    product: ProductOut
     quantity: int
-    price: float         # This is the price at the time of purchase
+    price: float
     variant_id: Optional[int] = None
     
     class Config:
@@ -122,12 +162,19 @@ class OrderOut(BaseModel):
     status: str
     payment_status: str
     created_at: datetime
-    items: List[OrderItemOut] = [] # 🔥 Returns all specific items bought in this order
+    items: List[OrderItemOut] = []
+
+    # 🔥 FIX: Converts SQLAlchemy Enums to Strings so Pydantic doesn't error out
+    @field_validator("status", "payment_status", mode="before")
+    @classmethod
+    def convert_enum(cls, v):
+        if hasattr(v, "value"):
+            return str(v.value)
+        return str(v)
 
     class Config:
         from_attributes = True
 
-        
 # --- ADDRESS SCHEMAS ---
 
 class AddressBase(BaseModel):
